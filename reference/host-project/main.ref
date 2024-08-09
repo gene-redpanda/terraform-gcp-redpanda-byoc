@@ -1,0 +1,139 @@
+variable "project_id" {
+  description = "The ID of the host project"
+  type        = string
+}
+
+variable "network_name" {
+  description = "The name of the shared VPC network"
+  type        = string
+}
+
+variable "region" {
+  description = "The region for resources"
+  type        = string
+}
+
+variable "primary_subnet_name" {
+  description = "The name of the primary subnet"
+  type        = string
+}
+
+variable "secondary_pod_range_name" {
+  description = "The name of the secondary IPv4 range for pods"
+  type        = string
+}
+
+variable "secondary_service_range_name" {
+  description = "The name of the secondary IPv4 range for services"
+  type        = string
+}
+
+variable "router_name" {
+  description = "The name of the compute router"
+  type        = string
+}
+
+variable "address_name" {
+  description = "The name of the compute address"
+  type        = string
+}
+
+variable "nat_config_name" {
+  description = "The name of the NAT configuration"
+  type        = string
+}
+
+variable "gke_master_cidr_range" {
+  description = "The CIDR range for GKE master"
+  type        = string
+}
+
+resource "google_compute_subnetwork" "primary_subnet" {
+  name          = var.primary_subnet_name
+  project       = var.project_id
+  network       = var.network_name
+  ip_cidr_range = "10.0.0.0/24"
+  region        = var.region
+
+  secondary_ip_range {
+    range_name    = var.secondary_pod_range_name
+    ip_cidr_range = "10.0.8.0/21"
+  }
+
+  secondary_ip_range {
+    range_name    = var.secondary_service_range_name
+    ip_cidr_range = "10.0.1.0/24"
+  }
+}
+
+resource "google_compute_router" "router" {
+  name    = var.router_name
+  project = var.project_id
+  region  = var.region
+  network = var.network_name
+}
+
+resource "google_compute_address" "address" {
+  name    = var.address_name
+  project = var.project_id
+  region  = var.region
+}
+
+resource "google_compute_firewall" "gke_webhooks" {
+  name        = "gke-redpanda-cluster-webhooks"
+  description = "Allow master to hit pods for admission controllers/webhooks"
+  network     = var.network_name
+  project     = var.project_id
+  direction   = "INGRESS"
+
+  source_ranges = [var.gke_master_cidr_range]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["9443", "8443", "6443"]
+  }
+}
+
+resource "google_compute_router_nat" "nat" {
+  name                               = var.nat_config_name
+  project                            = var.project_id
+  router                             = google_compute_router.router.name
+  region                             = var.region
+  nat_ip_allocate_option             = "MANUAL_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+  nat_ips                            = [google_compute_address.address.self_link]
+
+  enable_endpoint_independent_mapping = true
+}
+
+resource "google_compute_firewall" "redpanda_ingress" {
+  name        = "redpanda-ingress"
+  description = "Allow access to Redpanda cluster"
+  network     = var.network_name
+  project     = var.project_id
+  direction   = "INGRESS"
+
+  target_tags = ["redpanda-node"]
+
+  source_ranges = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["9092-9094", "30081", "30082", "30092"]
+  }
+}
+
+resource "google_project_iam_custom_role" "redpanda_agent_role" {
+  role_id     = "redpanda_agent_role"
+  title       = "Redpanda Agent Role"
+  description = "A role granting the redpanda agent permissions to view network resources in the project of the vpc."
+  permissions = [
+    "compute.firewalls.get",
+    "compute.networks.get",
+    "compute.subnetworks.get",
+    "resourcemanager.projects.get",
+    "compute.networks.getRegionEffectiveFirewalls",
+    "compute.networks.getEffectiveFirewalls",
+  ]
+  project = var.project_id
+}

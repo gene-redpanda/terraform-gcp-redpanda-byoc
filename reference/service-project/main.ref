@@ -1,0 +1,312 @@
+variable "service_project_id" {}
+variable "host_project_id" {}
+variable "region" {}
+variable "tiered_storage_bucket_name" {}
+variable "management_storage_bucket_name" {}
+variable "redpanda_cluster_gcp_sa_account_id" {}
+variable "console_gcp_sa_account_id" {}
+variable "connectors_gcp_sa_account_id" {}
+variable "gke_service_account_name" {}
+
+resource "google_project_service" "services" {
+  for_each = toset([
+    "cloudresourcemanager.googleapis.com",
+    "dns.googleapis.com",
+    "secretmanager.googleapis.com",
+    "compute.googleapis.com",
+    "iam.googleapis.com",
+    "storage-api.googleapis.com",
+    "container.googleapis.com",
+    "serviceusage.googleapis.com"
+  ])
+
+  project = var.service_project_id
+  service = each.key
+}
+
+resource "google_storage_bucket" "tiered_storage" {
+  name          = var.tiered_storage_bucket_name
+  location      = var.region
+  force_destroy = true
+  uniform_bucket_level_access = true
+}
+
+resource "google_storage_bucket" "management_storage" {
+  name          = var.management_storage_bucket_name
+  location      = var.region
+  force_destroy = true
+  uniform_bucket_level_access = true
+  versioning {
+    enabled = true
+  }
+}
+
+resource "google_service_account" "redpanda_agent" {
+  account_id   = "redpanda-agent"
+  display_name = "Redpanda Agent Service Account"
+  project      = var.service_project_id
+}
+
+resource "google_project_iam_custom_role" "redpanda_agent_role" {
+  role_id     = "redpanda_agent_role"
+  title       = "Redpanda Agent Role"
+  description = "A role comprising general permissions allowing the agent to manage Redpanda cluster resources."
+  permissions = [
+    "compute.firewalls.get",
+    "compute.globalOperations.get",
+    "compute.instanceGroupManagers.get",
+    "compute.instanceGroupManagers.delete",
+    "compute.instanceGroups.delete",
+    "compute.instances.list",
+    "compute.instanceTemplates.delete",
+    "compute.networks.get",
+    "compute.networks.getRegionEffectiveFirewalls",
+    "compute.networks.getEffectiveFirewalls",
+    "compute.projects.get",
+    "compute.subnetworks.get",
+    "compute.zoneOperations.get",
+    "compute.zoneOperations.list",
+    "compute.zones.get",
+    "compute.zones.list",
+    "dns.changes.create",
+    "dns.changes.get",
+    "dns.changes.list",
+    "dns.managedZones.create",
+    "dns.managedZones.delete",
+    "dns.managedZones.get",
+    "dns.managedZones.list",
+    "dns.managedZones.update",
+    "dns.projects.get",
+    "dns.resourceRecordSets.create",
+    "dns.resourceRecordSets.delete",
+    "dns.resourceRecordSets.get",
+    "dns.resourceRecordSets.list",
+    "dns.resourceRecordSets.update",
+    "iam.roles.get",
+    "iam.roles.list",
+    "iam.serviceAccounts.actAs",
+    "iam.serviceAccounts.get",
+    "iam.serviceAccounts.getIamPolicy",
+    "resourcemanager.projects.get",
+    "resourcemanager.projects.getIamPolicy",
+    "serviceusage.services.list",
+    "storage.buckets.get",
+    "storage.buckets.getIamPolicy",
+  ]
+  project = var.service_project_id
+}
+
+resource "google_project_iam_member" "redpanda_agent_role_binding" {
+  project = var.service_project_id
+  role    = google_project_iam_custom_role.redpanda_agent_role.id
+  member  = "serviceAccount:${google_service_account.redpanda_agent.email}"
+}
+
+resource "google_project_iam_member" "redpanda_agent_container_admin" {
+  project = var.service_project_id
+  role    = "roles/container.admin"
+  member  = "serviceAccount:${google_service_account.redpanda_agent.email}"
+}
+
+resource "google_storage_bucket_iam_member" "redpanda_agent_storage_admin" {
+  bucket = google_storage_bucket.management_storage.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.redpanda_agent.email}"
+}
+
+resource "google_project_iam_member" "redpanda_agent_host_project" {
+  count   = var.host_project_id != var.service_project_id ? 1 : 0
+  project = var.host_project_id
+  role    = google_project_iam_custom_role.redpanda_agent_role.id
+  member  = "serviceAccount:${google_service_account.redpanda_agent.email}"
+}
+
+resource "google_service_account" "redpanda_cluster" {
+  account_id   = "redpanda-cluster"
+  display_name = "Redpanda Cluster Service Account"
+  project      = var.service_project_id
+}
+
+resource "google_storage_bucket_iam_member" "redpanda_cluster_storage_admin" {
+  bucket = google_storage_bucket.tiered_storage.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.redpanda_cluster.email}"
+}
+
+resource "google_service_account" "redpanda_console" {
+  account_id   = "redpanda-console"
+  display_name = "Redpanda Console Service Account"
+  project      = var.service_project_id
+}
+
+resource "google_project_iam_custom_role" "redpanda_console_secret_manager_role" {
+  role_id     = "redpanda_console_secret_manager_role"
+  title       = "Redpanda Console Secret Manager Writer"
+  description = "Redpanda Console Secret Manager Writer"
+  permissions = [
+    "secretmanager.secrets.get",
+    "secretmanager.secrets.create",
+    "secretmanager.secrets.delete",
+    "secretmanager.secrets.list",
+    "secretmanager.secrets.update",
+    "secretmanager.versions.add",
+    "secretmanager.versions.destroy",
+    "secretmanager.versions.disable",
+    "secretmanager.versions.enable",
+    "secretmanager.versions.list",
+    "iam.serviceAccounts.getAccessToken"
+  ]
+  project = var.service_project_id
+}
+
+resource "google_project_iam_member" "redpanda_console_secret_manager_role_binding" {
+  project = var.service_project_id
+  role    = google_project_iam_custom_role.redpanda_console_secret_manager_role.id
+  member  = "serviceAccount:${google_service_account.redpanda_console.email}"
+}
+
+resource "google_service_account" "redpanda_connectors" {
+  account_id   = "redpanda-connectors"
+  display_name = "Redpanda Connectors Service Account"
+  project      = var.service_project_id
+}
+
+resource "google_project_iam_custom_role" "redpanda_connectors_role" {
+  role_id     = "redpanda_connectors_role"
+  title       = "Redpanda Connectors Custom Role"
+  description = "Redpanda Connectors Custom Role"
+  permissions = [
+    "resourcemanager.projects.get",
+    "secretmanager.versions.access"
+  ]
+  project = var.service_project_id
+}
+
+resource "google_project_iam_member" "redpanda_connectors_role_binding" {
+  project = var.service_project_id
+  role    = google_project_iam_custom_role.redpanda_connectors_role.id
+  member  = "serviceAccount:${google_service_account.redpanda_connectors.email}"
+}
+
+resource "google_service_account" "redpanda_gke" {
+  account_id   = "redpanda-gke"
+  display_name = "Redpanda GKE cluster default node service account"
+  project      = var.service_project_id
+}
+
+resource "google_project_iam_custom_role" "redpanda_gke_utility_role" {
+  role_id     = "redpanda_gke_utility_role"
+  title       = "Redpanda cluster utility node role"
+  description = "Redpanda cluster utility node role"
+  permissions = [
+    "artifactregistry.dockerimages.get",
+    "artifactregistry.dockerimages.list",
+    "artifactregistry.files.get",
+    "artifactregistry.files.list",
+    "artifactregistry.locations.get",
+    "artifactregistry.locations.list",
+    "artifactregistry.mavenartifacts.get",
+    "artifactregistry.mavenartifacts.list",
+    "artifactregistry.npmpackages.get",
+    "artifactregistry.npmpackages.list",
+    "artifactregistry.packages.get",
+    "artifactregistry.packages.list",
+    "artifactregistry.projectsettings.get",
+    "artifactregistry.pythonpackages.get",
+    "artifactregistry.pythonpackages.list",
+    "artifactregistry.repositories.downloadArtifacts",
+    "artifactregistry.repositories.get",
+    "artifactregistry.repositories.list",
+    "artifactregistry.repositories.listEffectiveTags",
+    "artifactregistry.repositories.listTagBindings",
+    "artifactregistry.repositories.readViaVirtualRepository",
+    "artifactregistry.tags.get",
+    "artifactregistry.tags.list",
+    "artifactregistry.versions.get",
+    "artifactregistry.versions.list",
+    "logging.logEntries.create",
+    "logging.logEntries.route",
+    "monitoring.metricDescriptors.create",
+    "monitoring.metricDescriptors.get",
+    "monitoring.metricDescriptors.list",
+    "monitoring.monitoredResourceDescriptors.get",
+    "monitoring.monitoredResourceDescriptors.list",
+    "monitoring.timeSeries.create",
+    "cloudnotifications.activities.list",
+    "monitoring.alertPolicies.get",
+    "monitoring.alertPolicies.list",
+    "monitoring.dashboards.get",
+    "monitoring.dashboards.list",
+    "monitoring.groups.get",
+    "monitoring.groups.list",
+    "monitoring.notificationChannelDescriptors.get",
+    "monitoring.notificationChannelDescriptors.list",
+    "monitoring.notificationChannels.get",
+    "monitoring.notificationChannels.list",
+    "monitoring.publicWidgets.get",
+    "monitoring.publicWidgets.list",
+    "monitoring.services.get",
+    "monitoring.services.list",
+    "monitoring.slos.get",
+    "monitoring.slos.list",
+    "monitoring.snoozes.get",
+    "monitoring.snoozes.list",
+    "monitoring.timeSeries.list",
+    "monitoring.uptimeCheckConfigs.get",
+    "monitoring.uptimeCheckConfigs.list",
+    "opsconfigmonitoring.resourceMetadata.list",
+    "resourcemanager.projects.get",
+    "stackdriver.projects.get",
+    "stackdriver.resourceMetadata.list",
+    "dns.changes.create",
+    "dns.changes.get",
+    "dns.changes.list",
+    "dns.managedZones.list",
+    "dns.resourceRecordSets.create",
+    "dns.resourceRecordSets.delete",
+    "dns.resourceRecordSets.get",
+    "dns.resourceRecordSets.list",
+    "dns.resourceRecordSets.update",
+    "secretmanager.versions.access",
+    "stackdriver.resourceMetadata.write",
+    "storage.objects.get",
+    "storage.objects.list"
+  ]
+  project = var.service_project_id
+}
+
+resource "google_project_iam_member" "redpanda_gke_utility_role_binding" {
+  project = var.service_project_id
+  role    = google_project_iam_custom_role.redpanda_gke_utility_role.id
+  member  = "serviceAccount:${google_service_account.redpanda_gke.email}"
+}
+
+resource "google_service_account_iam_member" "redpanda_cluster_workload_identity" {
+  service_account_id = "${var.redpanda_cluster_gcp_sa_account_id}@${var.service_project_id}.iam.gserviceaccount.com"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.service_project_id}.svc.id.goog[redpanda/rp-${var.redpanda_cluster_gcp_sa_account_id}]"
+}
+
+resource "google_service_account_iam_member" "console_workload_identity" {
+  service_account_id = "${var.console_gcp_sa_account_id}@${var.service_project_id}.iam.gserviceaccount.com"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.service_project_id}.svc.id.goog[redpanda/console-${var.console_gcp_sa_account_id}]"
+}
+
+resource "google_service_account_iam_member" "connectors_workload_identity" {
+  service_account_id = "${var.connectors_gcp_sa_account_id}@${var.service_project_id}.iam.gserviceaccount.com"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.service_project_id}.svc.id.goog[redpanda-connectors/connectors-${var.connectors_gcp_sa_account_id}]"
+}
+
+resource "google_service_account_iam_member" "cert_manager_workload_identity" {
+  service_account_id = "${var.gke_service_account_name}@${var.service_project_id}.iam.gserviceaccount.com"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.service_project_id}.svc.id.goog[cert-manager/cert-manager]"
+}
+
+resource "google_service_account_iam_member" "external_dns_workload_identity" {
+  service_account_id = "${var.gke_service_account_name}@${var.service_project_id}.iam.gserviceaccount.com"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.service_project_id}.svc.id.goog[external-dns/external-dns]"
+}
